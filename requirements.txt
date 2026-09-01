@@ -1,0 +1,7 @@
+# Runtime dependencies (versions intentionally unpinned; use current releases).
+unsatfit
+numpy
+pandas
+scipy
+scikit-learn
+matplotlib
