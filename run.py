@@ -51,7 +51,7 @@ import numpy as np
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# paths (relative to this github/ directory = the repository root)
+# paths (relative to the repository root)
 # ---------------------------------------------------------------------------
 DATA_CSV = os.path.join("data", "WRC_dataset_surya_et_al_2021_final.csv")
 RESULT = "result"
