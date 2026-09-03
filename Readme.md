@@ -1,4 +1,4 @@
-# Reproducibility repository
+# swrc-ptf: soil water retention model fitting, AICc model support, and support-stratified pedotransfer functions
 
 This repository accompanies a paper currently under submission. It is designed to ensure
 full transparency and reproducibility by allowing readers to reproduce the entire
@@ -40,8 +40,8 @@ function with a docstring, and `main()` calls them in order.
 2. Clone this repository:
 
    ```
-   git clone <this-repository-url>
-   cd <repository>
+   git clone https://github.com/sekika/swrc-ptf
+   cd swrc-ptf
    ```
 
 3. Obtain the input data and place it in `data/`.
