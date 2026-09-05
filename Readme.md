@@ -1,6 +1,12 @@
 # swrc-ptf: soil water retention model fitting, AICc model support, and support-stratified pedotransfer functions
 
-This repository accompanies a paper currently under submission. It is designed to ensure
+This repository accompanies a paper currently under submission.
+
+- Seki, Katsutoshi. Measurement-conditioned support for retention-model complexity and its
+implications for soil hydraulic pedotransfer functions. Available at SSRN:
+http://dx.doi.org/10.2139/ssrn.7411951
+
+It is designed to ensure
 full transparency and reproducibility by allowing readers to reproduce the entire
 analysis — every model fit, figure, and numeric table reported in the paper — from the
 openly available input data, by running a single script (`run.py`). Nothing in the paper's
@@ -76,7 +82,7 @@ function with a docstring, and `main()` calls them in order.
 Model support is decided by the corrected AIC (`aicc_ht`), which is undefined
 (`None`) when `N − k − 1 ≤ 0`; such curves are labelled AICc-uncomparable.
 
-## Reference
+## Data reference
 
 Gupta, S., Papritz, A., Lehmann, P., Hengl, T., Bonetti, S., Or, D., 2022. Global Soil
 Hydraulic Properties dataset based on legacy site observations and robust
