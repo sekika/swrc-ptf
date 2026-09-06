@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """run.py — reproduce the full computation of a paper currently under submission.
 
-Every analysis program written for the study is included here as a function (each with
-its own docstring); ``main()`` calls them in order. Running
+The functions required to reproduce the submitted analysis are documented below, and
+``main()`` calls them in order. Running
 
     python3 run.py
 
 from this directory reads the GSHP retention data placed in ``data/`` and regenerates:
 
   result/   computed numerical results (fits, model-support tables, PTF LORO, bootstrap CIs)
-  fig/      the seven manuscript figures (SVG)
-  table/    numeric tables computed from the data (table1, table3, tableS1, tableS3, tableS4)
+  fig/      the four computed manuscript figures (fig2 through fig5; SVG)
+  table/    numeric tables computed from the data (table1 and table2)
 
 The pipeline (functions grouped by stage):
 
@@ -18,11 +18,8 @@ The pipeline (functions grouped by stage):
   Stage    vg_fit_aic_*        single-VG (theta_r free) fit; the dual-VG-CH AICc is the one
                                recorded by Stage 1 at fit time (one fit per model), used to
                                classify each curve DVC-type / VG-type
-           degeneracy_*        degeneracy-pattern proportions and single-VG equivalence
-           identifiability_*   multistart / bootstrap / profile audit (canonical mode order)
-           wprofile_*          w1 profile-RMSE example curves (Fig 5a)
-           support_*           measurement-conditioned model support (Tables 1, Figs 2-3, 5b)
-           ptf_*               support-stratified linear PTFs, all-cell LORO, 2x2, cluster CIs
+           support_*           measurement-conditioned model support (Table 1, Figs 2-3)
+           ptf_*               support-stratified linear PTFs and all-cell LORO (Table 2, Fig 5)
            downsample_*        within-curve downsampling support test (Fig 4)
   figures  make_figures        render the computed figures from the results
   tables   make_tables         write the numeric tables
@@ -45,6 +42,7 @@ Dependencies: see requirements.txt (unsatfit, numpy, pandas, scipy, scikit-learn
 import hashlib
 import json
 import os
+import shutil
 import warnings
 
 import numpy as np
@@ -62,9 +60,6 @@ ENCODING = "latin-1"
 # stage output directories (under result/)
 R_STAGE1 = os.path.join(RESULT, "stage1-dualvgch")
 R_VG = os.path.join(RESULT, "vg-fit-aic")
-R_DEGEN = os.path.join(RESULT, "degeneracy")
-R_IDENT = os.path.join(RESULT, "identifiability")
-R_WPROF = os.path.join(RESULT, "wprofile")
 R_SUPPORT = os.path.join(RESULT, "support-analysis")
 R_PTF = os.path.join(RESULT, "ptf-typed")
 R_DOWN = os.path.join(RESULT, "downsample")
@@ -411,375 +406,6 @@ def stage_vg_fit_aic(params_path, input_csv=DATA_CSV, out_dir=R_VG):
 
 
 # ===========================================================================
-# degeneracy patterns
-# ===========================================================================
-def classify_degeneracy(w1, m1, m2, w_eps=0.05, dm_eps=0.02):
-    """Classify a dual-VG-CH fit into a degeneracy pattern near the single-VG limits:
-    'P2_w1_0' (w1 ~ 0), 'P3_w1_1' (w1 ~ 1), 'P1_n1_n2' (|m1-m2| < dm_eps), else 'bimodal'.
-    """
-    if w1 < w_eps:
-        return "P2_w1_0"
-    if w1 > 1 - w_eps:
-        return "P3_w1_1"
-    if abs(m1 - m2) < dm_eps:
-        return "P1_n1_n2"
-    return "bimodal"
-
-
-def single_vg_rmse(h, th, ts_max):
-    """Fit a single VG with theta_r = 0 (const qr=0, q=1) to one curve; return its RMSE
-    (or None on failure). Used to check that degenerate dual fits equal a single VG.
-    """
-    f = unsatfit.Fit()
-    f.set_model("VG", const=["qr=0", "q=1"])
-    f.swrc = (h, th)
-    f.b_qs = (0.0, ts_max)
-    f.ini = (min(float(np.max(th)), ts_max * 0.999), 1.0, 0.3)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        try:
-            f.optimize()
-        except Exception:  # noqa: BLE001
-            return None
-    return float(f.se_ht) if f.success else None
-
-
-def stage_degeneracy(params_path, input_csv=DATA_CSV, out_dir=R_DEGEN, sample=800, seed=0):
-    """Classify every converged curve into P1/P2/P3/bimodal, report proportions, and verify
-    single-VG equivalence on a fixed random sample; write summary.json. Returns its path.
-    """
-    _require_unsatfit()
-    np.seterr(all="ignore"); warnings.filterwarnings("ignore")
-    os.makedirs(out_dir, exist_ok=True)
-    p = pd.read_csv(params_path, low_memory=False)
-    p = p[p["converged"] == True].copy()  # noqa: E712
-    N = len(p)
-    p["pattern"] = [classify_degeneracy(w, m1, m2) for w, m1, m2 in zip(p["w1"], p["m1"], p["m2"])]
-    counts = p["pattern"].value_counts().to_dict()
-    proportions = {k: {"n": int(counts.get(k, 0)), "pct": round(100 * counts.get(k, 0) / N, 2)}
-                   for k in ["P1_n1_n2", "P2_w1_0", "P3_w1_1", "bimodal"]}
-    single_like = sum(counts.get(k, 0) for k in ["P1_n1_n2", "P2_w1_0", "P3_w1_1"])
-
-    raw = pd.read_csv(input_csv, low_memory=False, encoding=ENCODING)
-    om = load_obs_map(raw, keep_saturation=True)
-    samp = p.sample(min(sample, N), random_state=seed)
-    rows = []
-    for _, r in samp.iterrows():
-        if r["layer_id"] not in om:
-            continue
-        h, th = om[r["layer_id"]]
-        sv = single_vg_rmse(h, th, float(r["theta_s_max"]))
-        if sv is None:
-            continue
-        rows.append((r["pattern"], float(r["rmse"]), sv))
-    cmp = pd.DataFrame(rows, columns=["pattern", "dual_rmse", "single_rmse"])
-    cmp["improve"] = cmp["single_rmse"] - cmp["dual_rmse"]
-    sv_check = {}
-    for pat, g in cmp.groupby("pattern"):
-        sv_check[pat] = {"n": int(len(g)), "dual_rmse_median": round(float(g["dual_rmse"].median()), 4),
-                         "single_rmse_median": round(float(g["single_rmse"].median()), 4),
-                         "improve_median": round(float(g["improve"].median()), 4),
-                         "frac_dual_eq_single": round(float((g["improve"] < 0.001).mean()), 3)}
-    summary = {"n_converged": int(N), "thresholds": {"w1_eps": 0.05, "dm_eps": 0.02},
-               "proportions": proportions, "single_like_pct": round(100 * single_like / N, 2),
-               "single_vg_check": {"sample_n": int(len(cmp)), "seed": seed, "by_pattern": sv_check,
-                                   "overall_frac_dual_eq_single": round(float((cmp["improve"] < 0.001).mean()), 3)},
-               "inputs_sha256": {"params": sha256(params_path), "raw": sha256(input_csv)}}
-    with open(os.path.join(out_dir, "summary.json"), "w") as fh:
-        json.dump(summary, fh, indent=2); fh.write("\n")
-    print(f"[degeneracy] non-degenerate (bimodal) "
-          f"{100 - summary['single_like_pct']:.2f}% of {N}")
-    return os.path.join(out_dir, "summary.json")
-
-
-# ===========================================================================
-# identifiability audit (canonical mode order)
-# ===========================================================================
-_PERT = {"qs": 0.05, "w1": 0.10, "a1": None, "m1": 0.05, "m2": 0.05}
-_NEAR_BEST_SSE = 1e-6
-
-
-def canon(s):
-    """Canonicalise a fitted solution to n1 >= n2 (m1 >= m2), swapping modes and w1 -> 1-w1
-    if needed, so dispersion statistics are not inflated by the label-switching symmetry.
-    """
-    if s["m1"] >= s["m2"]:
-        return s
-    r = dict(s)
-    r["w1"] = 1.0 - s["w1"]
-    r["m1"], r["m2"] = s["m2"], s["m1"]
-    return r
-
-
-def _new_dvc_fit(h, th, ts_max, const):
-    """Construct an unsatfit dual-VG-CH Fit with the given constraints and data bounds."""
-    f = unsatfit.Fit()
-    f.set_model("dual-VG-CH", const=const)
-    f.swrc = (h, th)
-    f.b_qs = (0.0, ts_max)
-    return f
-
-
-def _sse_of(f, h):
-    """Return the sum of squared residuals implied by unsatfit's RMSE se_ht over N points."""
-    return float(f.se_ht) ** 2 * len(h)
-
-
-def free_fit(h, th, ts_max, ini):
-    """Free dual-VG-CH fit (qr=0, q=1) from a given start; return dict(qs,w1,a1,m1,m2,sse)
-    or None if the optimiser fails or does not return 5 parameters.
-    """
-    f = _new_dvc_fit(h, th, ts_max, ["qr=0", "q=1"])
-    f.ini = ini
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        f.optimize()
-    if not f.success or len(f.fitted) != 5:
-        return None
-    qs, w1, a1, m1, m2 = (float(x) for x in f.fitted)
-    return dict(qs=qs, w1=w1, a1=a1, m1=m1, m2=m2, sse=_sse_of(f, h))
-
-
-def profile_curv(h, th, ts_max, opt):
-    """Local profile curvature: for each parameter, fix it a step away from the optimum,
-    re-optimise the rest, and record the mean SSE rise. Larger rise => better constrained.
-    """
-    order = ["qs", "w1", "a1", "m1", "m2"]
-    out = {}
-    for pname in order:
-        ini_others = tuple(opt[q] for q in order if q != pname)
-        if pname == "a1":
-            targets = [opt["a1"] * 2.0, opt["a1"] / 2.0]
-        elif pname == "qs":
-            targets = [min(opt["qs"] + _PERT["qs"], ts_max), max(opt["qs"] - _PERT["qs"], 1e-4)]
-        else:
-            targets = [min(opt[pname] + _PERT[pname], 1 - 1e-6), max(opt[pname] - _PERT[pname], 1e-6)]
-        rises = []
-        for val in targets:
-            f = _new_dvc_fit(h, th, ts_max, ["qr=0", "q=1", f"{pname}={val}"])
-            f.ini = ini_others
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    f.optimize()
-                if f.success:
-                    rises.append(max(0.0, _sse_of(f, h) - opt["sse"]))
-            except Exception:  # noqa: BLE001
-                pass
-        out[f"curv_{pname}"] = float(np.mean(rises)) if rises else np.nan
-    return out
-
-
-def multistart(h, th, ts_max, base, n_starts, rng):
-    """Multistart free fits from random starts; canonicalise near-best solutions and report
-    the SD of each parameter across them (ms_sd_*) as a numerical-stability check.
-    """
-    thmax = float(np.max(th))
-    starts = []
-    for _ in range(n_starts):
-        r = free_fit(h, th, ts_max, (min(thmax * rng.uniform(0.9, 1.0), ts_max * 0.999),
-                                     float(rng.uniform(0.1, 0.9)),
-                                     float(base["a1"] * 10 ** rng.uniform(-1, 1)),
-                                     float(rng.uniform(0.05, 0.95)), float(rng.uniform(0.05, 0.95))))
-        if r:
-            starts.append(r)
-    if not starts:
-        return dict(ms_n=0)
-    sse = np.array([s["sse"] for s in starts])
-    best = float(np.min(sse))
-    near = [canon(s) for s in starts if s["sse"] < best + _NEAR_BEST_SSE]
-
-    def sd(key, log=False):
-        v = np.array([(np.log10(s[key]) if log else s[key]) for s in near])
-        return float(np.std(v)) if len(v) > 1 else 0.0
-
-    return dict(ms_n=len(starts), ms_best_sse=best, ms_frac_at_best=float(len(near) / len(starts)),
-                ms_sd_qs=sd("qs"), ms_sd_log_a1=sd("a1", True), ms_sd_w1=sd("w1"),
-                ms_sd_m1=sd("m1"), ms_sd_m2=sd("m2"))
-
-
-def boot(h, th, ts_max, base, n_boot, rng):
-    """Nonparametric bootstrap of the observed points; refit and canonicalise each replicate;
-    report the SD of each parameter (boot_sd_*). Skipped implicitly for < 5 usable replicates.
-    """
-    n = len(h)
-    res = []
-    for _ in range(n_boot):
-        idx = rng.integers(0, n, n)
-        if np.unique(h[idx]).size < 5:
-            continue
-        r = free_fit(h[idx], th[idx], ts_max, (base["qs"], base["w1"], base["a1"], base["m1"], base["m2"]))
-        if r:
-            res.append(canon(r))
-    if len(res) < 5:
-        return dict(boot_n=len(res))
-
-    def sd(key, log=False):
-        v = np.array([(np.log10(s[key]) if log else s[key]) for s in res])
-        return float(np.std(v))
-
-    return dict(boot_n=len(res), boot_sd_qs=sd("qs"), boot_sd_log_a1=sd("a1", True),
-                boot_sd_w1=sd("w1"), boot_sd_m1=sd("m1"), boot_sd_m2=sd("m2"))
-
-
-def stratify(p, per_stratum, seed):
-    """Stratify converged curves by head-count bin, theta_s-at-bound, extreme w1, and close
-    modes, then draw up to ``per_stratum`` curves per stratum (fixed seed). Returns the sample.
-    """
-    hb = pd.cut(p["n_distinct_heads"], [0, 5, 7, 12, 10 ** 6], labels=["5", "6-7", "8-12", "13+"])
-    strata = pd.DataFrame({"head_bin": hb.astype(str),
-                           "ts_at_ub": p["theta_s_at_ub"].astype(bool).astype(int),
-                           "w1_extreme": ((p["w1"] < 0.05) | (p["w1"] > 0.95)).astype(int),
-                           "modes_close": ((p["m1"] - p["m2"]).abs() < 0.02).astype(int)})
-    p = p.assign(**{c: strata[c] for c in strata.columns})
-    rng = np.random.default_rng(seed)
-    picks = [g.sample(min(len(g), per_stratum), random_state=int(rng.integers(0, 1 << 31)))
-             for _, g in p.groupby(list(strata.columns))]
-    return pd.concat(picks).reset_index(drop=True)
-
-
-def stage_identifiability(params_path, input_csv=DATA_CSV, out_dir=R_IDENT,
-                          per_stratum=30, n_starts=15, n_boot=40, seed=0):
-    """Identifiability audit on a stratified subsample: profile curvature, multistart SD,
-    and bootstrap SD (all with canonical mode order). Writes identifiability_per_curve.csv
-    and summary.json. Returns the per-curve CSV path (input to the support analysis).
-    """
-    _require_unsatfit()
-    np.seterr(all="ignore"); warnings.filterwarnings("ignore")
-    os.makedirs(out_dir, exist_ok=True)
-    p = pd.read_csv(params_path, low_memory=False)
-    p = p[p["converged"] == True].copy()  # noqa: E712
-    sample = stratify(p, per_stratum, seed)
-    raw = pd.read_csv(input_csv, low_memory=False, encoding=ENCODING)
-    obs_map = load_obs_map(raw, keep_saturation=True)
-    print(f"[identifiability] subsample {len(sample)} curves", flush=True)
-
-    rng = np.random.default_rng(seed)
-    rows = []
-    for k, (_, r) in enumerate(sample.iterrows()):
-        lid = r["layer_id"]
-        if lid not in obs_map:
-            continue
-        h, th = obs_map[lid]
-        ts_max = float(r["theta_s_max"])
-        base = dict(qs=float(r["theta_s"]), w1=float(r["w1"]), a1=float(r["alpha"]),
-                    m1=float(r["m1"]), m2=float(r["m2"]),
-                    sse=float(r["rmse"]) ** 2 * len(h) if np.isfinite(r["rmse"]) else 0.0)
-        row = dict(layer_id=lid, reference=r.get("reference"), n_points=int(r["n_points"]),
-                   n_distinct_heads=int(r["n_distinct_heads"]), dof=int(r["dof"]),
-                   head_bin=r["head_bin"], ts_at_ub=int(r["ts_at_ub"]),
-                   w1=base["w1"], m1=base["m1"], m2=base["m2"], alpha=base["a1"],
-                   modes_close=int(abs(base["m1"] - base["m2"]) < 0.02),
-                   w1_extreme=int(base["w1"] < 0.05 or base["w1"] > 0.95))
-        if int(r["dof"]) > 0:
-            try:
-                row.update(profile_curv(h, th, ts_max, base))
-            except Exception:  # noqa: BLE001
-                pass
-        row.update(multistart(h, th, ts_max, base, n_starts, rng))
-        if int(r["n_distinct_heads"]) >= 8:
-            row.update(boot(h, th, ts_max, base, n_boot, rng))
-        rows.append(row)
-        if (k + 1) % 50 == 0:
-            print(f"  [identifiability] {k + 1}/{len(sample)}", flush=True)
-
-    per = pd.DataFrame(rows)
-    cpath = os.path.join(out_dir, "identifiability_per_curve.csv")
-    per.to_csv(cpath, index=False)
-
-    def summ(df, label):
-        d = {"label": label, "n": int(len(df))}
-        for c in ["ms_frac_at_best", "ms_sd_log_a1", "ms_sd_w1", "ms_sd_m1", "ms_sd_m2",
-                  "curv_a1", "curv_w1", "curv_qs", "curv_m1", "curv_m2", "boot_sd_log_a1", "boot_sd_w1"]:
-            if c in df:
-                d[c + "_median"] = float(np.nanmedian(df[c])) if df[c].notna().any() else None
-        return d
-
-    summary = {"n_curves": int(len(per)), "subsample_per_stratum": per_stratum,
-               "mode_order": "canonical (n1>=n2) before dispersion", "overall": summ(per, "overall"),
-               "by_head_bin": [summ(g, f"head_bin={k}") for k, g in per.groupby("head_bin")],
-               "outputs_sha256": {"identifiability_per_curve.csv": sha256(cpath)},
-               "inputs_sha256": {"params": sha256(params_path), "raw": sha256(input_csv)}}
-    with open(os.path.join(out_dir, "summary.json"), "w") as fh:
-        json.dump(summary, fh, indent=2, default=str); fh.write("\n")
-    print(f"[identifiability] per-curve -> {cpath}")
-    return cpath
-
-
-# ===========================================================================
-# w1 profile example (Fig 5a)
-# ===========================================================================
-def fit_fixed_w1(h, th, ts_max, w1, ini4):
-    """Fit dual-VG-CH with w1 fixed (const w1=..., qr=0, q=1), optimising (theta_s, alpha,
-    m1, m2) from ini4 = (qs, a1, m1, m2). Returns dict(qs,a1,m1,m2,sse,rmse) or None.
-    """
-    f = unsatfit.Fit()
-    f.set_model("dual-VG-CH", const=["qr=0", "q=1", f"w1={w1}"])
-    f.swrc = (h, th)
-    f.b_qs = (0.0, ts_max)
-    f.ini = ini4
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        f.optimize()
-    if not f.success or len(f.fitted) != 4:
-        return None
-    qs, a1, m1, m2 = (float(x) for x in f.fitted)
-    sse = float(f.se_ht) ** 2 * len(h)
-    return dict(qs=qs, a1=a1, m1=m1, m2=m2, sse=sse, rmse=(sse / len(h)) ** 0.5)
-
-
-def profile_one_w1(params, raw, layer_id, n_grid=19):
-    """Compute the w1 profile-RMSE envelope for one curve: at each w1 on a grid, keep the
-    best of a few starts (immune to path-dependence and to the mode-swap symmetry).
-    Returns a dict with the observed points and the (w1, rmse) profile.
-    """
-    prow = params[params["layer_id"] == layer_id]
-    if len(prow) == 0 or not bool(prow.iloc[0]["converged"]):
-        raise SystemExit(f"ERROR: layer_id {layer_id} missing or non-converged in params")
-    prow = prow.iloc[0]
-    ts_max = float(prow["theta_s_max"])
-    g = raw[(raw["layer_id"] == layer_id) & raw["lab_head_m"].notna() & raw["lab_wrc"].notna()
-            & (raw["lab_head_m"] >= 0)].sort_values("lab_head_m")
-    h, th = g["lab_head_m"].to_numpy(float), g["lab_wrc"].to_numpy(float)
-    grid = np.linspace(0.05, 0.95, n_grid)
-    qs0 = min(float(prow["theta_s"]), ts_max * 0.999)
-    m1, m2, a = float(prow["m1"]), float(prow["m2"]), float(prow["alpha"])
-    seeds = [(qs0, a, m1, m2), (qs0, a, m2, m1), (qs0, a, 0.5, 0.2), (qs0, a * 3, 0.3, 0.3)]
-    profile = []
-    for w1 in grid:
-        cand = [c for c in (fit_fixed_w1(h, th, ts_max, float(w1), ini) for ini in seeds) if c]
-        if cand:
-            profile.append(dict(w1=float(w1), rmse=min(cand, key=lambda c: c["sse"])["rmse"]))
-    rmses = [p["rmse"] for p in profile]
-    return dict(layer_id=str(layer_id), reference=str(prow.get("reference")), n_points=int(len(h)),
-                n_distinct_heads=int(prow["n_distinct_heads"]), w1_fit=float(prow["w1"]),
-                dm=float(abs(prow["m1"] - prow["m2"])),
-                best_rmse=float(prow["rmse"]) if np.isfinite(prow["rmse"]) else None,
-                rmse_min=float(min(rmses)), rmse_max=float(max(rmses)),
-                observed=[[float(a), float(b)] for a, b in zip(h, th)], profile=profile)
-
-
-def stage_wprofile(params_path, input_csv=DATA_CSV, out_dir=R_WPROF,
-                   layer_ids=("Zalf132", "UNSODA4790"), n_grid=19):
-    """Write wprofile_example.json with the w1 profile of two contrasting curves (a VG-like
-    flat profile and a two-component curve with a clear minimum). Returns the JSON path.
-    """
-    _require_unsatfit()
-    np.seterr(all="ignore"); warnings.filterwarnings("ignore")
-    os.makedirs(out_dir, exist_ok=True)
-    params = pd.read_csv(params_path, low_memory=False)
-    raw = pd.read_csv(input_csv, low_memory=False, encoding=ENCODING)
-    curves = [profile_one_w1(params, raw, lid, n_grid) for lid in layer_ids]
-    opath = os.path.join(out_dir, "wprofile_example.json")
-    with open(opath, "w") as fh:
-        json.dump({"curves": curves,
-                   "inputs_sha256": {"params": sha256(params_path), "raw": sha256(input_csv)}},
-                  fh, indent=2); fh.write("\n")
-    print(f"[wprofile] -> {opath}")
-    return opath
-
-
-# ===========================================================================
 # measurement-conditioned model support
 # ===========================================================================
 def _frac(mask, denom):
@@ -789,11 +415,11 @@ def _frac(mask, denom):
             "pct": (round(100 * (mask & denom).sum() / d, 1) if d else None)}
 
 
-def stage_support_analysis(params_path, vg_path, input_csv, ident_csv, out_dir=R_SUPPORT):
+def stage_support_analysis(params_path, vg_path, input_csv, out_dir=R_SUPPORT):
     """Compute measurement-conditioned model support from the derived fits (no new fitting):
     the three-group counts (Table 1), the Delta-AICc distribution (Fig 2a), support rates by
-    number of points / head range / SWCC class / study (Figs 2b, 3), and the identifiability x
-    support cross-tabulation (Fig 5b). Writes several CSVs and summary.json. Returns out_dir.
+    number of points / head range / SWCC class / study (Figs 2b, 3). Writes several CSVs and
+    summary.json. Returns out_dir.
     """
     os.makedirs(out_dir, exist_ok=True)
     vg = pd.read_csv(vg_path, low_memory=False)
@@ -877,33 +503,13 @@ def stage_support_analysis(params_path, vg_path, input_csv, ident_csv, out_dir=R
     pd.DataFrame(by_np).to_csv(os.path.join(out_dir, "support_by_npoints.csv"), index=False)
     pd.DataFrame(by_hr).to_csv(os.path.join(out_dir, "support_by_headrange.csv"), index=False)
 
-    idf = pd.read_csv(ident_csv, low_memory=False)
-    idf = idf.merge(vg[["layer_id", "type", "aicc_vg", "aicc_dvc"]], on="layer_id", how="left")
-    idf["support"] = np.where(idf["aicc_vg"].notna() & idf["aicc_dvc"].notna(),
-                              np.where(idf["aicc_dvc"] < idf["aicc_vg"], "DVC", "VG"), "uncomparable")
-    idf["degen"] = [classify_degeneracy(w, a, b) for w, a, b in zip(idf["w1"], idf["m1"], idf["m2"])]
-    idf.to_csv(os.path.join(out_dir, "identifiability_support.csv"), index=False)
-    id_by_support = {}
-    for sup, sub in idf.groupby("support"):
-        col = {}
-        for metric in ("ms_sd_w1", "boot_sd_w1", "curv_w1"):
-            v = pd.to_numeric(sub[metric], errors="coerce").dropna() if metric in sub else pd.Series(dtype=float)
-            col[metric] = {"n": int(len(v)), "median": (round(float(v.median()), 4) if len(v) else None),
-                           "q25": (round(float(v.quantile(.25)), 4) if len(v) else None),
-                           "q75": (round(float(v.quantile(.75)), 4) if len(v) else None)}
-        col["degen_mix_pct"] = {k: round(100 * (sub["degen"] == k).mean(), 1)
-                                for k in ("P1_n1_n2", "P2_w1_0", "P3_w1_1", "bimodal")}
-        col["n"] = int(len(sub))
-        id_by_support[sup] = col
-
     summary = {"aicc_audit": {"k_vg": 4, "k_dvc": 5, "min_n_defined_vg": min_n_vg,
                               "min_n_defined_dvc": min_n_dvc},
                "group_counts_all": groups, "group_counts_ptf_frame": frame,
                "delta_aicc": delta_dist, "support_by_npoints": by_np, "support_by_headrange": by_hr,
                "support_by_swcc": by_swcc, "support_by_study": study_summary,
-               "identifiability_by_support": id_by_support,
                "inputs_sha256": {"params": sha256(params_path), "vg": sha256(vg_path),
-                                 "raw": sha256(input_csv), "identifiability": sha256(ident_csv)}}
+                                 "raw": sha256(input_csv)}}
     with open(os.path.join(out_dir, "summary.json"), "w") as fh:
         json.dump(summary, fh, indent=2, default=str); fh.write("\n")
     print(f"[support] DVC-support {groups['DVC_support']['pct']}% of converged; "
@@ -1245,7 +851,7 @@ def make_figures(result_dir=RESULT, fig_dir=FIG):
     """Render the computed manuscript figures (SVG) from the results in ``result_dir``.
 
     Presentation only: reads the fixed result JSON/CSV files and writes fig/fig2.svg ..
-    fig/fig7.svg. This repository outputs only figures whose content is computed from the
+    fig/fig5.svg. This repository outputs only figures whose content is computed from the
     data. Grayscale, dark legible English labels, no titles inside the figures, no hatching.
     """
     import matplotlib
@@ -1260,7 +866,7 @@ def make_figures(result_dir=RESULT, fig_dir=FIG):
     INK, GRAY, FILL, MID, DARKFILL, DARKER, GRID = ("#222222", "#777777", "#E8E8E8", "#C4C4C4",
                                                     "#9A9A9A", "#6E6E6E", "#D0D0D0")
     SUPPORT, PTFV2 = R_SUPPORT, R_PTF
-    DOWN, WPROFILE = R_DOWN, os.path.join(R_WPROF, "wprofile_example.json")
+    DOWN = R_DOWN
 
     def load(path):
         with open(path) as fh:
@@ -1363,38 +969,7 @@ def make_figures(result_dir=RESULT, fig_dir=FIG):
             fontsize=9, color=INK)
     ax.grid(axis="y", color=GRID, lw=0.6); style(ax); save(fig, 4)
 
-    # Fig 5: identifiability x support
-    wp = load(WPROFILE); curves = wp["curves"]; idb = sup["identifiability_by_support"]
-    fig = plt.figure(figsize=(9.6, 4.1)); gs = fig.add_gridspec(1, 2, width_ratios=[1.05, 1.0], wspace=0.36)
-    a1, a2 = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
-    sty = [("-", "o", INK, "VG-like (flat)"),
-           ("--", "s", "white", "two-component (clear minimum)")]
-    ymax = 0
-    for cv, (ls, mk, mfc, lb) in zip(curves, sty):
-        w = [pp["w1"] for pp in cv["profile"]]; rm = [pp["rmse"] for pp in cv["profile"]]
-        ymax = max(ymax, max(rm))
-        a1.plot(w, rm, ls, marker=mk, color=INK, mfc=mfc, mec=INK, ms=5, lw=1.5, zorder=3, label=lb)
-    a1.set_xlim(0, 1); a1.set_ylim(0, ymax * 1.25)
-    a1.set_xlabel("mode weight $w_1$ (fixed; re-optimise rest)", fontsize=9.5)
-    a1.set_ylabel(r"RMSE [m$^3$ m$^{-3}$]", fontsize=9.5)
-    a1.text(0.0, 1.04, "(a) $w_1$ profile RMSE", transform=a1.transAxes, fontsize=9.5, color=INK)
-    a1.legend(frameon=False, fontsize=8.5, loc="upper center", handlelength=2.0)
-    a1.grid(color=GRID, lw=0.5); style(a1)
-    keys = ["bimodal", "P1_n1_n2", "P2_w1_0", "P3_w1_1"]
-    klab = ["two-\ncomponent", "$n_1{\\approx}n_2$", "$w_1{\\approx}0$", "$w_1{\\approx}1$"]
-    for j, (sk, slab, fc) in enumerate([("DVC", "DVC-supported", DARKFILL), ("VG", "VG-supported", FILL)]):
-        mix = idb[sk]["degen_mix_pct"]; vals = [mix[k] for k in keys]
-        xx = np.arange(len(keys)) + (j - 0.5) * 0.38
-        a2.bar(xx, vals, width=0.38, color=fc, edgecolor=INK, lw=0.7, label=f"{slab} (n={idb[sk]['n']})")
-        for xi, v in zip(xx, vals):
-            a2.text(xi, v + 1.5, f"{v:.0f}", ha="center", fontsize=8.5, color=INK)
-    a2.set_xticks(np.arange(len(keys))); a2.set_xticklabels(klab, fontsize=8.5); a2.set_ylim(0, 100)
-    a2.set_ylabel("% of curves in support class", fontsize=9.5)
-    a2.text(0.0, 1.04, "(b) degeneracy mix by model support", transform=a2.transAxes, fontsize=9.5, color=INK)
-    a2.legend(frameon=False, fontsize=8.5, loc="upper right"); a2.grid(axis="y", color=GRID, lw=0.6)
-    style(a2); save(fig, 5)
-
-    # Fig 6: support-conditioned LORO error
+    # Fig 5: support-conditioned LORO error
     t = pd.read_csv(os.path.join(PTFV2, "table.csv"))
     evlab = {"VG": "not classified as\nDVC-supported", "DVC": "DVC\nsupported", "ALL": "all curves"}
     ev_order = ["VG", "DVC", "ALL"]
@@ -1416,61 +991,19 @@ def make_figures(result_dir=RESULT, fig_dir=FIG):
     ax.set_ylabel(r"reconstructed $\theta(h)$ LORO RMSE [m$^3$ m$^{-3}$]", fontsize=9.5)
     ax.set_ylim(0, max(t["loro_rmse_micro"].dropna()) * 1.28)
     ax.legend(frameon=False, fontsize=8.5, loc="upper left", ncol=2); ax.grid(axis="y", color=GRID, lw=0.6)
-    style(ax); save(fig, 6)
-
-    # Fig 7: 2x2 decomposition + CIs
-    psum = load(os.path.join(PTFV2, "summary.json")); bb = psum["two_by_two_DVC_eval"]; con = psum["contrasts"]
-    fig = plt.figure(figsize=(10.0, 4.6)); gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.15], wspace=0.42)
-    a1, a2 = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
-    cells = [("VG_model", "train_DVCsupport(E)", "VG /\nDVC-support (E)"),
-             ("VG_model", "train_ALL(B)", "VG /\nall (B)"),
-             ("DVC_model", "train_DVCsupport(C)", "DVC /\nDVC-support (C)"),
-             ("DVC_model", "train_ALL(D)", "DVC /\nall (D)")]
-    vals = [bb[m][k] for m, k, _ in cells]
-    bars = a1.bar(range(4), vals, width=0.7, color=[FILL, MID, DARKFILL, DARKER], edgecolor=INK, lw=0.8)
-    for i, v in enumerate(vals):
-        a1.text(i, v + 0.0008, f"{v:.4f}", ha="center", fontsize=8.5, color=INK)
-    a1.set_xticks(range(4)); a1.set_xticklabels([c[2] for c in cells], fontsize=8.5); a1.set_ylim(0, max(vals) * 1.22)
-    a1.set_ylabel(r"LORO $\theta(h)$ RMSE on DVC-supported [m$^3$ m$^{-3}$]", fontsize=9)
-    a1.text(0.0, 1.04, "(a) param. & reconstr. $\\times$ training", transform=a1.transAxes, fontsize=9.5, color=INK)
-    a1.grid(axis="y", color=GRID, lw=0.6); style(a1)
-    items = [("training_DVCmodel_C-D", "training set\n(C $-$ D, DVC reconstr.)"),
-             ("modelform_DVCtrain_E-C", "param. & reconstr.\n(E $-$ C, DVC-support)"),
-             ("modelform_ALLtrain_B-D", "param. & reconstr.\n(B $-$ D, all)"),
-             ("C-B_on_DVC", "best-vs-baseline\n(C $-$ B)")]
-    ys = [i * 1.6 for i in range(len(items))][::-1]
-    for y, (key, lb) in zip(ys, items):
-        r = con[key]; lo, hi = r["ci95"]
-        a2.plot([lo, hi], [y, y], color=INK, lw=2.2, solid_capstyle="round", zorder=2)
-        a2.plot(r["point"], y, "o", color=INK, ms=7, zorder=3)
-        a2.text(0.99, y + 0.30, lb, transform=a2.get_yaxis_transform(), ha="right", va="bottom",
-                fontsize=8.5, color=INK)
-    a2.axvline(0, color=INK, lw=1.0, ls="--"); a2.set_yticks(ys)
-    a2.set_yticklabels([f"n={con[k]['n_refs']}" for k, _ in items], fontsize=8.5)
-    a2.set_ylim(-0.9, max(ys) + 1.1)
-    a2.set_xlabel(r"study-clustered LORO RMSE difference [m$^3$ m$^{-3}$]", fontsize=9.5)
-    a2.text(0.0, 1.04, "(b) contrasts (95% cluster-bootstrap CI)", transform=a2.transAxes, fontsize=9.5, color=INK)
-    a2.text(0.02, 0.02, "$\\leftarrow$ first term better", transform=a2.transAxes, fontsize=8.5, color=INK)
-    a2.grid(axis="x", color=GRID, lw=0.6); style(a2); save(fig, 7)
-    print(f"[figures] fig2-7 -> {fig_dir}")
+    style(ax); save(fig, 5)
+    print(f"[figures] fig2-5 -> {fig_dir}")
 
 
 # ===========================================================================
 # numeric tables
 # ===========================================================================
 def make_tables(result_dir=RESULT, table_dir=TABLE):
-    """Write the numeric tables computed from the data: table1 (three-group model-support
-    counts), table3 (reconstructed-theta LORO micro RMSE matrix), tableS1 (curve accounting),
-    tableS3 (per-study LORO folds for DVC-supported evaluation), tableS4 (apparent RMSE matrix).
-    Concept/design tables (Table 2, S2, S5) are not computed and are not emitted here.
-    """
+    """Write the two numeric tables reported in the v2 manuscript."""
     os.makedirs(table_dir, exist_ok=True)
     with open(os.path.join(R_SUPPORT, "summary.json")) as fh:
         sup = json.load(fh)
-    with open(os.path.join(R_STAGE1, "summary.json")) as fh:
-        st1 = json.load(fh)["counts"]
     ptf_tbl = pd.read_csv(os.path.join(R_PTF, "table.csv"))
-    per_ref = pd.read_csv(os.path.join(R_PTF, "per_reference_loro.csv"))
 
     # table1: three groups x {all converged, predictor-complete, PTF-fit frame}
     g = sup["group_counts_all"]; fr = sup["group_counts_ptf_frame"]
@@ -1493,39 +1026,12 @@ def make_tables(result_dir=RESULT, table_dir=TABLE):
     ])
     t1.to_csv(os.path.join(table_dir, "table1.csv"), index=False)
 
-    # table3: LORO micro RMSE matrix (PTF x eval group)
-    t3 = ptf_tbl.pivot(index="ptf", columns="eval", values="loro_rmse_micro")
-    t3 = t3.reindex(index=["A", "B", "C", "D", "E"], columns=["VG", "DVC", "ALL"])
-    t3.columns = ["eval_not_DVC_supported", "eval_DVC_supported", "eval_all"]
-    t3.to_csv(os.path.join(table_dir, "table3.csv"))
-
-    # tableS1: curve accounting
-    total = st1["total"]; excl_pts = st1["excl_points"]; excl_nb = st1["excl_nobound"]
-    fitted = st1["fitted"]; converged = st1["converged"]; nonconv = st1["nonconverged"]
-    s1 = pd.DataFrame([
-        {"stage": "Full GSHP database", "curves": total, "removed": None, "reason": None},
-        {"stage": "DVC fitting target", "curves": fitted, "removed": excl_pts + excl_nb,
-         "reason": f"valid points < {MIN_POINTS} ({excl_pts}) / no theta_s bound ({excl_nb})"},
-        {"stage": "DVC converged", "curves": converged, "removed": nonconv, "reason": "dual-VG-CH non-converged"},
-        {"stage": "predictor-complete descriptive set", "curves": sup["group_counts_ptf_frame"]["n_frame"],
-         "removed": converged - sup["group_counts_ptf_frame"]["n_frame"], "reason": "sand/clay/bulk-density or VG-table match missing"},
-        {"stage": "PTF-fit set", "curves": n_ptf, "removed": sup["group_counts_ptf_frame"]["n_frame"] - n_ptf,
-         "reason": "horizon-midpoint depth missing; VG non-converged"},
-    ])
-    s1.to_csv(os.path.join(table_dir, "tableS1.csv"), index=False)
-
-    # tableS3: per-study LORO folds for PTF C on DVC-supported evaluation
-    cdvc = per_ref[(per_ref["ptf"] == "C") & (per_ref["eval"] == "DVC")].copy()
-    cdvc = cdvc.rename(columns={"count": "pooled_points", "rmse": "loro_rmse_C"})
-    cdvc = cdvc[["reference", "pooled_points", "loro_rmse_C"]].sort_values("pooled_points", ascending=False)
-    cdvc.to_csv(os.path.join(table_dir, "tableS3.csv"), index=False)
-
-    # tableS4: apparent (non-cross-validated) micro RMSE matrix
-    s4 = ptf_tbl.pivot(index="ptf", columns="eval", values="fit_rmse_micro")
-    s4 = s4.reindex(index=["A", "B", "C", "D", "E"], columns=["VG", "DVC", "ALL"])
-    s4.columns = ["eval_not_DVC_supported", "eval_DVC_supported", "eval_all"]
-    s4.to_csv(os.path.join(table_dir, "tableS4.csv"))
-    print(f"[tables] table1, table3, tableS1, tableS3, tableS4 -> {table_dir}")
+    # table2: LORO micro RMSE matrix (PTF x evaluation group)
+    t2 = ptf_tbl.pivot(index="ptf", columns="eval", values="loro_rmse_micro")
+    t2 = t2.reindex(index=["A", "B", "C", "D", "E"], columns=["VG", "DVC", "ALL"])
+    t2.columns = ["eval_not_DVC_supported", "eval_DVC_supported", "eval_all"]
+    t2.to_csv(os.path.join(table_dir, "table2.csv"))
+    print(f"[tables] table1, table2 -> {table_dir}")
 
 
 # ===========================================================================
@@ -1539,14 +1045,13 @@ def main():
         raise SystemExit(f"ERROR: input data not found at {DATA_CSV}. See Readme.md for how to "
                          "obtain the GSHP dataset and place it under data/.")
     for d in (RESULT, FIG, TABLE):
-        os.makedirs(d, exist_ok=True)
+        if os.path.isdir(d):
+            shutil.rmtree(d)
+        os.makedirs(d)
 
     params_path = stage1_dualvgch_fit(DATA_CSV, R_STAGE1)
     vg_path = stage_vg_fit_aic(params_path, DATA_CSV, R_VG)
-    stage_degeneracy(params_path, DATA_CSV, R_DEGEN)
-    ident_csv = stage_identifiability(params_path, DATA_CSV, R_IDENT)
-    stage_wprofile(params_path, DATA_CSV, R_WPROF)
-    stage_support_analysis(params_path, vg_path, DATA_CSV, ident_csv, R_SUPPORT)
+    stage_support_analysis(params_path, vg_path, DATA_CSV, R_SUPPORT)
     stage_ptf(params_path, vg_path, DATA_CSV, R_PTF)
     stage_downsample(params_path, vg_path, DATA_CSV, R_DOWN)
     make_figures(RESULT, FIG)

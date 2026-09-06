@@ -1,6 +1,8 @@
 # swrc-ptf: soil water retention model fitting, AICc model support, and support-stratified pedotransfer functions
 
-This repository accompanies a paper currently under submission. It is designed to ensure
+This repository accompanies a paper currently under submission.
+
+It is designed to ensure
 full transparency and reproducibility by allowing readers to reproduce the entire
 analysis — every model fit, figure, and numeric table reported in the paper — from the
 openly available input data, by running a single script (`run.py`). Nothing in the paper's
@@ -17,17 +19,15 @@ figures and numeric tables.
 
 `python3 run.py` reads the GSHP retention data in `data/` and writes:
 
-- `result/` — computed results: the fitted parameters, the three-group model-support
-  tables, the PTF leave-one-reference-out (LORO) errors, the study-clustered bootstrap
-  confidence intervals, and the supporting analyses (degeneracy, identifiability,
-  downsampling, w1 profiles).
-- `fig/` — the computed manuscript figures (`fig2.svg` … `fig7.svg`).
-- `table/` — the numeric tables computed from the data: `table1` (three-group counts),
-  `table3` (reconstructed-θ(h) LORO micro RMSE), `tableS1` (curve accounting),
-  `tableS3` (per-study LORO folds for DVC-supported evaluation), `tableS4` (apparent RMSE).
+- `result/` — fitted parameters, three-group model support, PTF leave-one-reference-out
+  (LORO) errors, and within-curve downsampling results.
+- `fig/` — the four computed manuscript figures (`fig2.svg` … `fig5.svg`).
+- `table/` — the two numeric tables reported in the manuscript: `table1` (three-group
+  counts) and `table2` (reconstructed-θ(h) LORO micro RMSE).
 
-All analysis code is in a single self-contained script, `run.py`; each stage is a
-function with a docstring, and `main()` calls them in order.
+All analysis code is in a single self-contained script, `run.py`; each executed stage is
+a documented function, and `main()` calls them in order. The generated output directories
+are recreated at the start of each run so they contain only the current outputs.
 
 ## Usage
 
